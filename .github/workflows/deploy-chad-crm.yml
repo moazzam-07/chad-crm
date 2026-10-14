@@ -8,18 +8,48 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 concurrency:
   group: chad-crm-production
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/twenty-docker/twenty/Dockerfile
+          target: twenty
+          push: true
+          tags: |
+            ghcr.io/moazzam-07/chad-crm:${{ github.sha }}
+            ghcr.io/moazzam-07/chad-crm:production
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
       DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+      REGISTRY_USER: ${{ github.actor }}
+      REGISTRY_TOKEN: ${{ github.token }}
+      RELEASE_SHA: ${{ github.sha }}
     steps:
       - name: Configure SSH
         env:
@@ -30,28 +60,16 @@ jobs:
           chmod 600 ~/.ssh/chad-crm-deploy
           ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
 
-      - name: Build and deploy on production
+      - name: Pull and deploy production image
         env:
           DEPLOY_KEY: ~/.ssh/chad-crm-deploy
-          RELEASE_SHA: ${{ github.sha }}
         run: |
-          ssh -i "$DEPLOY_KEY" -o BatchMode=yes -o ServerAliveInterval=30 "$DEPLOY_USER@$DEPLOY_HOST" "RELEASE_SHA='$RELEASE_SHA' bash -s" <<'REMOTE'
+          ssh -i "$DEPLOY_KEY" -o BatchMode=yes -o ServerAliveInterval=30 "$DEPLOY_USER@$DEPLOY_HOST" "REGISTRY_USER='$REGISTRY_USER' REGISTRY_TOKEN='$REGISTRY_TOKEN' RELEASE_SHA='$RELEASE_SHA' bash -s" <<'REMOTE'
           set -euo pipefail
 
-          repo_dir=/opt/chad-crm
-          if [ ! -d "$repo_dir/.git" ]; then
-            git clone --filter=blob:none --depth=1 https://github.com/moazzam-07/chad-crm.git "$repo_dir"
-          fi
-
-          cd "$repo_dir"
-          git fetch --filter=blob:none --depth=1 origin main
-          git checkout --detach "$RELEASE_SHA"
-
-          docker build \
-            --target twenty \
-            --file packages/twenty-docker/twenty/Dockerfile \
-            --tag chad-crm:production \
-            .
+          echo "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_USER" --password-stdin
+          docker pull "ghcr.io/moazzam-07/chad-crm:$RELEASE_SHA"
+          docker logout ghcr.io >/dev/null 2>&1 || true
 
           sed -i 's#^SERVER_URL=.*#SERVER_URL=https://chad-crm.demgrow.online#' /opt/twenty/.env
           if grep -q '^EMAIL_FROM_NAME=' /opt/twenty/.env; then
@@ -60,12 +78,12 @@ jobs:
             printf '\nEMAIL_FROM_NAME="Chad CRM"\n' >> /opt/twenty/.env
           fi
 
-          cat > /opt/twenty/docker-compose.override.yml <<'OVERRIDE'
+          cat > /opt/twenty/docker-compose.override.yml <<OVERRIDE
           services:
             server:
-              image: chad-crm:production
+              image: ghcr.io/moazzam-07/chad-crm:$RELEASE_SHA
             worker:
-              image: chad-crm:production
+              image: ghcr.io/moazzam-07/chad-crm:$RELEASE_SHA
           OVERRIDE
 
           cd /opt/twenty
