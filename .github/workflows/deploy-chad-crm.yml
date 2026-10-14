@@ -17,10 +17,13 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -35,6 +38,7 @@ jobs:
           context: .
           file: packages/twenty-docker/twenty/Dockerfile
           target: twenty
+          platforms: linux/arm64
           push: true
           tags: |
             ghcr.io/moazzam-07/chad-crm:${{ github.sha }}
